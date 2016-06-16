@@ -1,0 +1,71 @@
+\documentclass[a4paper, 10pt]{article}
+\usepackage[utf8x]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{ucs}
+\usepackage[danish]{babel}
+\usepackage[parfill]{parskip}
+\usepackage{minted}
+
+\renewenvironment{verbatim}{}{}
+
+\widowpenalty=1000
+\clubpenalty=1000
+
+\author{Henrik Bendt (gwk553)}
+\title{Swarm Simulation using Quadtrees\\Assignment 4\\Advanced Programming}
+\date{\today}
+
+\begin{document}
+\maketitle
+\pagebreak
+
+\section*{Implementation}
+\subsection*{quadtree.erl}
+%TODO
+The quadtree cannot be initialised with a bound of ``universe'' nor ``empty'', as this does not make sense. Thus the bound must be a quadtuple of two coordinates.
+
+The quadtreeCoordinator is the root to (and manager of) the quad tree. This is an individual process that never terminates, unless stop is send - but then all children (subprocesses) of this, that is, the whole quad tree, are also terminated.
+When a new element is added, all nodes check if it is out of bounds, including the quadtreeCoordinator. This could look somewhat redundant, but is necesarry because of mapFunction. 
+If element is out of bounds, do nothing (throw it away) and continue (loop).
+
+When a leaf is transformed to a node (that is, the number of elements exceed the Limit), first all the new children (leafs) are created as a dictionary, containing \textit{pids} as values for each quarter as keys. Then all the elements of the leaf are send as new ``add\_element'' messages to itself. Before these are recieved (and handled), the process calls the function-loop for nodes, along with the newly made children and already defined bound and parent. This means that the process turns from a leaf-process to a node-process (but does not change its \textit{pid}). The now-node-process can now handle the elements, that was previously messaged to itself, as it would if it recieved any other new element, by directing each element to its rightful leaf (quarter).
+
+If a mapFunction is applied successfully to a list of elements, they are all added, like new elements, to the parrent node. This is to make sure that each element is kept inside the bound of the leaf. If an element has moved outside of bounds of the whole quadtree, it is discarded by the root (quadtreeCoordinator). To use the mapFunction on all elements in the tree, use the atom ``universe'' as bound.
+
+When applying mapFunction or mapTreeFunction, the call is embedded in a \texttt{catch} or \texttt{try-catch}-statement, to insure robustness. In case of errors, the process will keep on as nothing happended (that is, loop with original arguments).
+
+I use the from Erlang intended exit-message, to stop processes, that is:
+\begin{verbatim}
+exit(Pid, normal)
+\end{verbatim}
+If any node is asked to terminate, its children are also asked to terminate.
+
+I use a dictionary to keep children in the tree, because it is easy to access the right child using quarters as keys. This is however not smart when mapping over the list, because each element is more difficult to access, than if I used a list. Because a quadtree is limited to four children, a list, or especially a quadtuple, would have been a more effecient datastructure.
+
+
+\subsection*{swarm.erl}
+The fish school is started with the function \texttt{start}, where bound and limit is given, and the pid of the fishschool is returned.
+
+Fish are added via \texttt{addFish}, adding a fish at position $(0,0)$ with a zero velocity and velocity change vector.
+All fish have a unique number starting from 0.
+
+All fish are moved by an interval of 50 ms, where first a move phase and then a attraction/repulsion phase (not implemented) happens.
+
+The move phase is just an application of the function \texttt{moveFish} to all fish via \texttt{mapFunction}.
+
+\subsubsection*{Attraction/repulsion phase}
+Implemented, but not working. The apply\_interval is not working, but if I give it a list of one element, then it just gives errors at every interval.
+
+Use the \texttt{mapFunction} over a limited bound defined by the zones. This would be defined by the fish in question to be the center and then the radius of attraction and repulsion zone, accordingly, to all sides (note this bound would be a square, not a circle). Do note that the attraction bound is limited to be between 7 and 10 from the fish in question, so the above would not be enough. Before calculating a fish, a check of its distance to be between 7 and 10 should be made.
+With this, applying the function \texttt{updateChangeVector} with \texttt{calculateAttraction} and \texttt{calculateRepulsion} accordingly, would update the velocity change vectors of all the fish in the zones.
+
+Thus the above should be mapped to all fish to update all fish correctly. The move phase of the next interval would then move the fish by the above calculated amount.
+
+\subsection*{Assessment}
+%Use Eunit test
+%TODO
+Not done.
+
+I would have based my assessment on unit tests, but this will not guarantee much, only that the program works for the tested inputs (of which one can argue that the program will work for more inputs, especially if border cases are tested as correct).Automation would give even more certainty of correctness of the program, but this is difficult to make for this program, as it does not handle high numbers of fish very well (because of the many processes spawned), which automated tests would be great to test.
+
+\end{document}

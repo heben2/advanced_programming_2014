@@ -1,0 +1,1458 @@
+\documentclass[11pt]{article}
+\usepackage{minted}
+\usepackage[margin=1in]{geometry}
+
+\renewenvironment{verbatim}{}{}
+
+
+\begin{document}
+\section*{Appendices}
+\section{SalsaParser.hs}
+\begin{verbatim}
+\begin{minted}{haskell}
+--
+-- Salsa parser
+-- Edited by Henrik Bendt, gwk553, November 2013
+--
+{-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
+
+module SalsaParser 
+( parseString
+, parseFile
+) where
+
+import SalsaAst
+import Text.Parsec.Prim hiding (token)
+import Text.Parsec.Char
+import Text.Parsec.String
+import Text.Parsec.Combinator
+import Text.Parsec.Error
+import Control.Monad (void)
+
+type Error = ParseError --Use errors from Parsec
+
+-- Helper functions from CurvySyntax.hs from Reference Solutions on Absalon. 
+token :: Parser a -> Parser a
+token p = do x <- p
+             spaces
+             return x
+
+symbol :: String -> Parser ()
+symbol = void . token . string
+
+reserved :: [String]
+reserved = ["viewdef", "rectangle", "circle", "group", "view", "blue", "plum", 
+            "red", "green", "orange"]
+
+constituent :: Parser Char
+constituent = alphaNum <|> char '_'
+
+-- Handles multiple types of parentheses, defined by the two given strings.
+parens :: String -> Parser a -> String -> Parser a
+parens s1 p s2 = do symbol s1
+                    x <- p
+                    symbol s2
+                    return x
+
+-- Helper function working like chail1, though expanded to take another parser 
+-- type to apply on right side after left recursion.
+chainl2 :: (Stream s m t) => (ParsecT s u m a, ParsecT s u m b) -> 
+            ParsecT s u m (a -> b -> a) -> ParsecT s u m a
+chainl2 (p,q) op        = do{ x <- p; rest x }
+                    where
+                      rest x    = do{ f <- op
+                                    ; y <- q
+                                    ; rest (f x y)
+                                    }
+                                <|> return x
+
+vIdent :: Parser Ident
+vIdent = token $ do
+    l1 <- upper
+    ls <- many1 constituent
+    return $ l1:ls
+
+sIdent :: Parser Ident
+sIdent = token $ do
+    l1 <- lower
+    ls <- many1 constituent
+    let l = l1:ls
+    if l `elem` reserved then
+        fail $ "'" ++ l ++ "' is a reserved word."
+    else return l
+
+pos :: Parser Pos
+pos = p1 <|> p2
+    where p1 = do   symbol "+"
+                    (e1, e2) <- p
+                    return $ Rel e1 e2
+          p2 = do   (e1, e2) <- p
+                    return $ Abs e1 e2
+          p  = do   symbol "("
+                    x <- expr
+                    symbol ","
+                    y <- expr
+                    symbol ")"
+                    return (x,y)
+
+expr :: Parser Expr
+expr = prim `chainl1` (plusOp <|> minusOp)
+    where plusOp = do   symbol "+"
+                        return Plus
+          minusOp = do  symbol "-"
+                        return Minus
+          prim = par <|> int <|> proj
+              where par = parens "(" expr ")"
+                    int = do    digits <- many1 digit
+                                spaces
+                                return $ Const $ read digits
+                    proj = do   i <- sIdent
+                                symbol "."
+                                do symbol "x"
+                                   return $ Xproj i
+                                   <|> do symbol "y"
+                                          return $ Yproj i
+
+def :: Parser Definition
+def = try viewdef <|> try rectangle <|> try circle <|> try view <|> group
+    where viewdef = do      symbol "viewdef"
+                            i <- vIdent
+                            e1 <- expr
+                            e2 <- expr
+                            return $ Viewdef i e1 e2
+          rectangle = do    symbol "rectangle"
+                            (i,e1,e2,e3) <- figure
+                            e4 <- expr
+                            c <- color
+                            return $ Rectangle i e1 e2 e3 e4 c
+          circle = do       symbol "circle"
+                            (i,e1,e2,e3) <- figure
+                            c <- color
+                            return $ Circle i e1 e2 e3 c
+          view = do         symbol "view"
+                            i <- vIdent
+                            return $ View i
+          group = do        symbol "group"
+                            i <- vIdent
+                            is <- parens "[" (many1 vIdent) "]"
+                            return $ Group i is
+          color = ret (symbol "blue") Blue
+              <|> ret (symbol "plum") Plum
+              <|> ret (symbol "red") Red
+              <|> ret (symbol "green") Green
+              <|> ret (symbol "orange") Orange
+          ret s f = s >> return f
+          figure = do       i <- sIdent
+                            e1 <- expr
+                            e2 <- expr
+                            e3 <- expr
+                            return (i, e1, e2, e3)
+
+com :: Parser Command
+com = c0
+    where c0 = c1 `chainl1` op (symbol "||") Par
+          c1 = (c2, vIdent) `chainl2` op (symbol "@") At 
+          c2 = c3 <|> c4 
+          c3 = parens "{" com "}"
+          c4 = do is <- many1 sIdent
+                  symbol "->"
+                  p <- pos
+                  return $ Move is p
+          op s f = s >> return f
+
+defCom :: Parser DefCom
+defCom = try d <|> c
+        where d = do d' <- def
+                     return $ Def d'
+              c = do c' <- com
+                     return $ Com c'
+
+program :: Parser Program
+program = do _ <- spaces
+             e <- many1 defCom
+             eof
+             return e
+
+parseString :: String -> Either Error Program
+parseString = parse program ""
+
+parseFile :: FilePath -> IO (Either Error Program)
+parseFile filename = fmap parseString $ readFile filename
+\end{minted}
+\end{verbatim}
+
+\newpage
+\section{SalsaInterp.hs}
+\begin{verbatim}
+\begin{minted}{haskell}
+--
+-- Salsa interpreter
+-- Edited by Henrik Bendt, gwk553, November 2013
+--
+{-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
+
+module SalsaInterp
+    (Position, interpolate, runProg)
+where
+
+import SalsaAst
+import Gpx
+import qualified Data.Map as M 
+import qualified Data.Maybe as MB
+import qualified Data.List as L
+
+--
+-- The function interpolate
+--
+
+type Position = (Integer, Integer)
+interpolate :: Integer -> Position -> Position -> [Position]
+interpolate n (x1,y1) (x2,y2) = 
+    [(round $ x1' + a * d1, round $ y1' + a * d2) | a <- [1.0.. n']]
+    where d1 = (x2'-x1')/ n'
+          d2 = (y2'-y1')/ n'
+          x1' = convertInt x1
+          x2' = convertInt x2
+          y1' = convertInt y1
+          y2' = convertInt y2
+          n' = convertInt n
+          convertInt :: Integer -> Double
+          convertInt = fromIntegral
+
+--
+-- Define the types Context and SalsaCommand
+--
+
+data Shape = NewRectangle Integer Integer Integer Integer ColourName
+           | NewCircle Integer Integer Integer ColourName
+data Environment = Environment 
+        {
+            views  :: M.Map ViewName (Integer, Integer), -- view name -> view dimensions
+            groups :: M.Map String [String], --group id -> ids in group
+            shapes :: M.Map String Shape, --shape id -> shape
+            aViews :: [ViewName], --active view names
+            framerate :: Integer
+        }
+type State = M.Map String [(ViewName, Position)] --Shape [( View, (current) Position)]
+data Context = Context Environment State
+
+emptyState :: State
+emptyState = M.empty
+emptyEnvironment :: Integer -> Environment
+emptyEnvironment = Environment M.empty M.empty M.empty []
+emptyContext :: Integer -> Context
+emptyContext f = Context (emptyEnvironment f) emptyState
+emptyFrames :: [Frame]
+emptyFrames = []
+
+newtype SalsaCommand a = SalsaCommand { runSC :: Context -> (a, State) }
+
+instance Monad SalsaCommand where
+    return x = SalsaCommand $ \(Context _ state) -> (x, state)
+    (SalsaCommand m) >>= f = SalsaCommand $ \(Context env state) -> 
+                                let (x, state') = m (Context env state)
+                                    (SalsaCommand g) = f x
+                                in g (Context env state')
+
+
+-- functions for manipulating the context
+
+-- Calculates given expression base on given state
+-- All expressions computes to integers
+calcExpr :: Expr -> Context -> Integer
+calcExpr (Const i) _                = i
+calcExpr (Plus e1 e2) c             = (+) (calcExpr e1 c) (calcExpr e2 c)
+calcExpr (Minus e1 e2) c            = (-) (calcExpr e1 c) (calcExpr e2 c)
+calcExpr (Xproj i) (Context env s)  = 
+    case M.lookup i s of
+        Just a@((_,(k,_)):_) -> 
+            foldr (\(vId,(x,_)) currInt -> if vId `elem` aViews env 
+                                             then min currInt x 
+                                           else currInt) 
+            k a
+        _ -> error "X-indent not found"
+--        Nothing -> error "X-indent not found"
+calcExpr (Yproj i) (Context env s)  = 
+    case M.lookup i s of
+        Just a@((_,(_,k)):_) -> 
+            foldr (\(vId,(_,y)) currInt -> if vId `elem` aViews env
+                                             then min currInt y 
+                                           else currInt) 
+            k a
+        _ -> error "Y-indent not found" -- All shapes should have positions.
+--        Nothing -> error "Y-indent not found" 
+
+getColor :: Colour -> ColourName
+getColor c = case c of
+                Blue    -> "blue"
+                Plum    -> "plum"
+                Red     -> "red"
+                Green   -> "green"
+                Orange  -> "orange"
+
+-- Returns given dimension if positive
+checkDim :: Integer -> Integer
+checkDim d = if d < 0 then error "Cannot have negative dimensions" else d
+
+
+-- Returns list of idents.
+-- Ident can be a group. No check if group idents are of views.
+getViewId :: Environment -> ViewName -> [ViewName]
+getViewId env ident = 
+    if M.member ident $ views env then
+        [ident]
+    else getGroupMems env ident
+
+-- Get idents of group.
+getGroupMems :: Environment -> String -> [ViewName]
+getGroupMems env gId = 
+    MB.fromMaybe (error "Group id not found.") 
+      (M.lookup gId $ groups env)
+
+
+--
+-- Define the function command
+--
+
+command :: Command -> SalsaCommand ()
+command (Move shapeIds pos) = 
+    SalsaCommand $ \con@(Context env state) -> 
+        ((), 
+         M.mapWithKey (\k a -> 
+            if k `elem` shapeIds then
+                case pos of
+                    Abs e1 e2 -> 
+                        map (\p@(i,_) -> 
+                                if i `elem` aViews env then --Must be active view
+                                    (i,(calcExpr e1 con, calcExpr e2 con))
+                                else p) a
+                    Rel e1 e2 -> 
+                        map (\p@(i,(x,y)) -> 
+                            if i `elem` aViews env then --Must be active view
+                                (i,(x + calcExpr e1 con, y + calcExpr e2 con))
+                            else p) a
+            else a)
+            state
+        )
+command (At com i) = -- command com only affects view(s) i (can point to group)
+    SalsaCommand $ \(Context env state) -> 
+        ((),
+         let members = getViewId env i
+             env' = Environment (views env) (groups env) (shapes env) 
+                                members (framerate env)
+             (_, state') = runSC (command com) (Context env' state)
+         in state'
+        )
+command (Par c1 c2) = --execute c1 and c2 concurrently. May not manipulate same shape.
+    SalsaCommand $ \con@(Context _ state) -> 
+        ((),
+         let (_, state1) = runSC (command c1) con
+             (_, state2) = runSC (command c2) con
+             (_, diff1) = M.partitionWithKey  --Find changed shapes
+                           (\k a -> case M.lookup k state of
+                                       Just x -> a == x
+                                       Nothing -> True
+                           ) state1
+             (_, diff2) = M.partitionWithKey 
+                           (\k a -> case M.lookup k state of
+                                       Just x -> a == x
+                                       Nothing -> True
+                           ) state2
+         in if M.intersection diff1 diff2 == emptyState then -- must be no equal shapes
+               M.unions [diff1, diff2, state]
+            else error "Concurrent commands manipulates same shapes"
+        )
+
+--
+-- Define the type Salsa
+--
+
+newtype Salsa a = Salsa {runS :: Context -> [Frame] -> (a, Context, [Frame])}
+
+instance Monad Salsa where
+    return k              =  Salsa $ \con f -> (k, con, f)
+    Salsa m >>= f         =  Salsa $ \con frames -> 
+                                    let (x, con', frames') = m con frames
+                                        Salsa g = f x
+                                    in g con' frames'
+
+--
+-- Define the functions liftC, definition, and defCom
+--
+
+-- Lift command to salsa, that is run the command and use new state.
+liftC :: SalsaCommand a -> Salsa a
+liftC sc = 
+    Salsa $ \con@(Context env state) frames -> 
+        let (a, state') = runSC sc con
+            frames' = calcFrames state state' env ++ frames
+        in (a, Context env state', frames')
+    where 
+        -- Takes start and end state and environment.
+        -- Combines frames calculated for each shape by calcGpxInstrs.
+        -- Returns the frames between the two current key frames
+        calcFrames :: State -> State -> Environment -> [Frame]
+        calcFrames s1 s2 env = 
+            {-for each list of frames in the list, combine first elems(gpxInstr) 
+              to one list of gpxInstr, that is, a frame. -}
+            map concat $
+            L.transpose $
+            M.elems $ --[[frame]], list of list of frame pr shape
+            M.mapWithKey  
+                (\sName vps1 -> 
+                    case M.lookup sName s2 of
+                        Just vps2 -> getShapeFrames 
+                            (MB.fromMaybe (error "Shape not found in environment.") 
+                                $ M.lookup sName $ shapes env)
+                            vps1 vps2 (framerate env)
+                        Nothing -> 
+                            error "Something went wrong. Cannot find shape in both key frames"
+                ) s1
+        -- Takes shape, list of starting pos on views,list of ending pos on views and the framerate
+        -- Returns list of frames for the shape on each view, that is , one GpxInstr pr shape pr view pr frame.
+        getShapeFrames :: Shape -> [(ViewName, Position)] -> 
+                          [(ViewName, Position)] -> Integer -> [Frame]
+        getShapeFrames s vps1 vps2 fr = L.transpose vFrames
+            where vFrames = zipWith (\(v1,pos1) (_,pos2) ->     -- Returns list of frames for each view for the given shape
+                                        getShapeGpxInstrs s v1 pos1 pos2 fr) --If views are not same, then this goes wrong.
+                            vps1 vps2
+
+        -- Returns the frames for the given shape on the given view.
+        getShapeGpxInstrs :: Shape -> ViewName -> Position -> 
+                             Position -> Integer -> [GpxInstr]
+        getShapeGpxInstrs s vn pos1 pos2 fr = 
+            case s of
+                NewRectangle _ _ w h c -> 
+                    L.reverse $ map (\(x', y') -> DrawRect x' y' w h vn c) posList
+                NewCircle _ _ r c -> 
+                    L.reverse $ map (\(x', y') -> DrawCirc x' y' r vn c) posList
+            where posList = interpolate fr pos1 pos2
+
+
+-- Compute definition and update Salsa monad (that is, the context)
+definition :: Definition -> Salsa ()
+definition (Viewdef i e1 e2) = Salsa $ 
+    \con@(Context env state) frame -> 
+        ((),
+         let e1' = checkDim $ calcExpr e1 con
+             e2' = checkDim $ calcExpr e2 con
+             views' = M.insert i (e1', e2') $ views env
+         in Context (Environment views' (groups env) (shapes env) [i]
+                  (framerate env))
+            state,
+        frame)
+definition (Rectangle i e1 e2 e3 e4 c) = Salsa $ 
+    \con@(Context env state) frame -> 
+        let e1'' = calcExpr e1 con --Hlint is silly...
+            e2' = calcExpr e2 con
+            e3' = checkDim $ calcExpr e3 con
+            e4' = checkDim $ calcExpr e4 con
+            c' = getColor c
+            shapes' = M.insert i (NewRectangle e1'' e2' e3' e4' c') $ shapes env
+            v = map (\ident -> (ident,(e1'', e2'))) $ aViews env --Insert on active views
+            state' = M.insert i v state
+            frame' = case frame of 
+                    [] -> [map (\vn -> DrawRect e1'' e2' e3' e4' vn c') 
+                               (aViews env)]
+                    f:fs -> (f ++ map (\vn -> DrawRect e1'' e2' e3' e4' vn c') 
+                                      (aViews env)) : fs
+        in
+        ((),
+         Context (Environment (views env) (groups env) 
+                  shapes' (aViews env) (framerate env)) state',
+         frame')
+definition (Circle i e1 e2 e3 c) = Salsa $ 
+    \con@(Context env state) frame -> 
+        let e1' = calcExpr e1 con
+            e2' = calcExpr e2 con
+            e3' = checkDim $ calcExpr e3 con
+            c' = getColor c
+            shapes' = M.insert i (NewCircle e1' e2' e3' c') $ shapes env
+            v = map (\ident -> (ident,(e1', e2'))) $ aViews env --Insert on active views
+            state' = M.insert i v state
+            frame' = case frame of 
+                    [] -> [map (\vn -> DrawCirc e1' e2' e3' vn c') 
+                               (aViews env)]
+                    f:fs -> (f ++ map (\vn -> DrawCirc e1' e2' e3' vn c') 
+                                      (aViews env)) : fs
+        in
+        ((),
+         Context (Environment (views env) (groups env) 
+                  shapes' (aViews env) (framerate env)) state',
+         frame')
+definition (View i) = Salsa $ 
+    \(Context env state) frame -> 
+        ((),
+         Context (Environment (views env) (groups env) (shapes env) 
+                  (getViewId env i) 
+                  (framerate env))
+            state,
+         frame)
+definition (Group i ids) = Salsa $ 
+    \(Context env state) frame -> 
+        ((),
+         let groups' = M.insert i ids $ groups env
+         in Context (Environment (views env) groups'
+                  (shapes env) (aViews env) (framerate env))
+            state,
+         frame)
+
+defCom :: DefCom -> Salsa ()
+defCom (Def def) = definition def
+defCom (Com com) = liftC $ command com
+
+--
+-- Define the function runProg
+--
+
+runProg :: Integer -> Program -> Animation
+runProg f prog = (viewList, L.reverse frames)
+    where (_, Context env _, frames) = 
+                    runS (mapM defCom prog) (emptyContext f) emptyFrames
+          viewList = map (\(k, (a, b)) -> (k, a, b)) $ M.toList $ views env
+\end{minted}
+\end{verbatim}
+
+\newpage
+\section{at\_server.erl}
+\begin{verbatim}
+\begin{minted}{erlang}
+%%%-------------------------------------------------------------------
+%%% @author Michael Kirkedal Thomsen <shapper@diku.dk>
+%%% @copyright (C) 2013, Michael Kirkedal Thomsen
+%%% @doc
+%%% Skeleton for AP Exam 2013.
+%%% Implementation of the atomic transaction server
+%%% @end
+%%% Created : Oct 2013 by Michael Kirkedal Thomsen <shapper@diku.dk>
+%%%-------------------------------------------------------------------
+%%% Student name: Henrik Bendt
+%%% Student KU-id: gwk553
+%%%-------------------------------------------------------------------
+
+-module(at_server).
+
+-export([start/1, stop/1, begin_t/1, doquery/2, query_t/3, update_t/3, commit_t/2]).
+
+%%%-------------------------------------------------------------------
+%%% API
+%%%-------------------------------------------------------------------
+
+start(State) ->
+    {ok, spawn(fun() -> process_flag(trap_exit, true), 
+    stateloop(State, dict:new(), dict:new()) end)}. %Returns {ok, AT}
+
+stop(AT) -> rpc(AT, stop). %Returns {ok, State}
+
+doquery(AT, Fun) -> %Do a querry, not depending on a transaction (no update inteded)
+    rpc(AT, {query, Fun}). %Synchronous to block
+
+% Returns a reference
+begin_t(AT) ->
+    rpc(AT, makeRef).
+
+query_t(AT, Ref, Fun) -> %Do a non-updating query on the current state of transaction ref.
+    rpc(AT, {query, Fun, Ref}). %Synchronous to block
+
+update_t(AT, Ref, Fun) -> 
+    info(AT, {updateState, Fun, Ref}). %Asynchronous to not block
+
+commit_t(AT, Ref) -> 
+    rpc(AT, {commitState, Ref}).
+
+
+%Server loop for the current state of the server, along with the current transactions
+
+stateloop(State, Trans, Waiting) ->
+    Self = self(),
+    receive
+        {From, makeRef} -> %make intermediate copy of state with new ref.
+            Ref = make_ref(),
+            Pid = spawn_link(fun() -> transactionHelper(Self, State, Ref) end),
+            reply_ok(From, Ref),
+            stateloop(State, dict:store(Ref, Pid, Trans), Waiting);
+        {From, {query, Fun}} -> %query on state of server
+            case calcQuery(State, Fun) of
+                {ok, Result} -> reply_ok(From, Result);
+                _ -> reply_error(From)
+            end;
+        {From, {query, Fun, Ref}} -> %query on state of transaction
+            case dict:find(Ref, Trans) of
+                {ok, Pid} -> 
+                    info(Pid, {Self, query, Fun}),
+                    stateloop(State, Trans, dict:store(Ref, From, Waiting));
+                _ -> reply_abort(From)
+            end;
+        {queryAns, Result, Ref} ->
+            reply_ok(dict:fetch(Ref, Waiting), Result),
+            stateloop(State, Trans, dict:erase(Ref,Waiting));
+        {updateState, Fun, Ref} -> %Update a current state of a transaction
+            case dict:find(Ref, Trans) of
+                {ok, Pid} -> info(Pid, {Self, update, Fun});
+                _ -> stateloop(State, Trans, Waiting)
+            end;
+        {From, {commitState, Ref}} -> %Commit a transaction and abort all other
+            case dict:find(Ref, Trans) of
+                {ok, Pid} ->
+                    case rpcE(Pid, getState) of
+                        {ok, NewState} -> 
+                            reply_ok(From),
+                            dict:map(fun(_,P) -> reply_abort(P) end,
+                                dict:erase(Ref,Waiting)), %Abort all blocking processes
+                            dict:map(fun(_,P) -> exit(P, aborted) end, Trans), %Kill all transaction subprocesses
+                            stateloop(NewState, dict:new(), dict:new()); %Set new state and abort all other transactions.;
+                        _ -> 
+                            reply_abort(From), %Something went wrong. Remove transaction.
+                            stateloop(State, dict:erase(Ref, Trans), Waiting)
+                    end;
+                _ -> 
+                    reply_abort(From),
+                    stateloop(State, Trans, Waiting)
+            end;
+        {From, stop} ->
+            reply_ok(From, State),
+            dict:map(fun(_,P) -> reply_abort(P) end, Waiting), %Abort all waiting processes
+            exit(terminated); %Kill self and all (linked) subprocesses, that is all transaction processes
+        {From, _} -> 
+            reply_error(From);
+        {'EXIT', _, {aborted, Ref}} -> %Subprocess has aborted. Tell waiting processes
+            case dict:find(Ref, Waiting) of
+                {ok, Pid} -> 
+                    reply_abort(Pid),
+                    stateloop(State, dict:erase(Ref, Trans), dict:erase(Ref, Waiting));
+                _ -> stateloop(State, dict:erase(Ref, Trans), Waiting)
+            end;
+        _ -> %bad call, keep looping. Also catches normal exits of transactionHelpers
+            stateloop(State, Trans, Waiting)
+    end,
+    stateloop(State, Trans, Waiting). %Needed because not all recieve-cases loops themselves
+
+% Subprocesses for each transaction of stateloop. 
+% Can only be manipulated by its parrent, the server.
+transactionHelper(Server, State, Ref) -> 
+    receive
+        {Server, getState} -> 
+            reply_ok(Server, State);
+        {Server, query, Fun} ->
+            case calcQuery(State, Fun) of
+                {ok, Result} -> 
+                    info(Server, {queryAns, Result, Ref}),
+                    transactionHelper(Server, State, Ref);
+                _ -> 
+                    exit({aborted, Ref})
+            end;
+        {Server, update, Fun} ->
+            try Fun(State) of 
+                NewState -> 
+                    transactionHelper(Server, NewState, Ref)
+            catch
+                _ : _ -> 
+                    exit({aborted, Ref}) %Case of error, abort and tell server                    
+            end;
+        {Server, aborted} -> exit(normal); %No need for server to catch this as server aborted me
+        _ -> transactionHelper(Server, State, Ref)
+    end.
+    
+
+calcQuery(State, Fun) ->
+    try 
+        Result = Fun(State),
+        {ok, Result}
+    catch
+        _ : _ -> error
+    end.
+
+
+%%%-------------------------------------------------------------------
+%%% Communication primitives
+%%%-------------------------------------------------------------------
+
+%% synchronous communication
+rpcE(Pid, Request) ->
+    Pid ! {self(), Request},
+    receive
+        {Pid, Response} -> Response;
+        {'EXIT', Pid, _} -> aborted
+    end.
+
+rpc(Pid, Request) ->
+    Pid ! {self(), Request},
+    receive
+        {Pid, Response} -> Response
+    end.
+
+reply(From,  Msg) ->
+    From ! {self(), Msg}.
+
+reply_ok(From) ->
+    reply(From, ok).
+
+reply_ok(From, Msg) ->
+    reply(From, {ok, Msg}).
+
+reply_error(From) ->
+    reply(From, error).
+
+reply_abort(From) -> %Changed this to only take From
+    reply(From, aborted).
+
+%% asynchronous communication
+
+info(Pid, Msg) ->
+    Pid ! Msg.
+
+
+%%%-------------------------------------------------------------------
+%%% Internal Implementation
+%%%-------------------------------------------------------------------
+
+% Your implementation of the atomic transaction server.
+
+
+\end{minted}
+\end{verbatim}
+
+\newpage
+\section{at\_extapi.erl}
+\begin{verbatim}
+\begin{minted}{erlang}
+
+-module(at_extapi).
+
+-export([abort/2, tryUpdate/2, ensureUpdate/2, choiceUpdate/3]).
+
+-import(at_server, [start/1, stop/1, begin_t/1, doquery/2, query_t/3, update_t/3, commit_t/2]).
+
+%%%-------------------------------------------------------------------
+%%% Extended API
+%%%-------------------------------------------------------------------
+
+%call update_t/query_t with a errorness function, that is, a function throwing an error.
+abort(AT, Ref) -> 
+    Fun = fun() -> throw(error) end,
+    update_t(AT, Ref, Fun). 
+
+tryUpdate(AT, Fun) -> 
+    {ok, Ref} = begin_t(AT),
+    case query_t(AT, Ref, Fun) of
+        {ok, _} ->
+            update_t(AT, Ref, Fun),
+            commit_t(AT, Ref); %Returns ok if successfull, else aborted
+        _ -> error %Return error if function fails
+    end.
+
+ensureUpdate(AT, Fun) ->
+    case tryUpdate(AT, Fun) of
+        aborted -> ensureUpdate(AT, Fun); %If the update is aborted, try again.
+        Msg -> Msg %Can be only ok or error.
+    end.
+
+choiceUpdate(AT, Fun, Val_list) -> 
+    Fun_list = lists:map(fun(E) -> (fun(S) -> Fun(S, E) end) end, Val_list),
+    Self = self(),
+    %Start all functions parallel
+    lists:map(
+        fun(E) -> 
+            spawn(fun() -> choiceUpdateSpawn(Self, AT, E) end) 
+        end, Fun_list),
+    choiceUpdateCheck(AT, Fun, Val_list, 0).
+
+% Waits for all spawned functions of choiceUpdate to 
+choiceUpdateCheck(AT, Fun, Val_list, Count) -> 
+    case Count >= length(Val_list) of
+        true  -> error;
+        false -> % else branch
+            receive
+                {ok, Ref} -> commit_t(AT, Ref);
+                _ -> choiceUpdateCheck(AT, Fun, Val_list, Count+1)
+            end
+    end.
+
+% For subprocesses of choiceUpdate
+% Begins a new 
+choiceUpdateSpawn(Parrent, AT, Fun) ->
+    {ok, Ref} = begin_t(AT),
+    update_t(AT, Ref, Fun), %Try to do the update
+    DummyFun = fun(A) -> A end, %Dummy function
+    case query_t(AT, Ref, DummyFun) of %Check if update is successfull
+        {ok, _} -> info(Parrent, {ok, Ref});
+        _ -> info(Parrent, error) %Return error if function fails
+    end.
+
+
+%%%-------------------------------------------------------------------
+%%% Communication primitives
+%%%-------------------------------------------------------------------
+
+info(Pid, Msg) ->
+    Pid ! Msg.
+\end{minted}
+\end{verbatim}
+
+\newpage
+\section{SalsaParser\_test.hs}
+\begin{verbatim}
+\begin{minted}{haskell}
+module SalsaParser_test (test) 
+where
+
+import SalsaAst
+import SalsaParser as P
+import Test.QuickCheck
+
+definitions :: [String]
+definitions = ["viewdef", "rectangle", "circle", "group", "view"]
+
+reserved :: [String]
+reserved = definitions++colour
+
+colour :: [String]
+colour = ["blue", "plum", "red", "green", "orange"]
+
+colorT :: String -> Colour
+colorT c = case c of 
+    "blue" -> Blue
+    "plum" -> Plum
+    "red" -> Red
+    "green" -> Green
+    "orange" -> Orange
+
+
+vIdentFirst :: String
+vIdentFirst = ['A'..'Z']
+
+sIdentFirst :: String
+sIdentFirst = ['a'..'z']
+
+nameChars :: String
+nameChars = '_' : ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9']
+
+numberString :: String
+numberString = ['0'..'9']
+
+
+newtype TestVarCol = TestVarCol (String, Colour)
+
+instance Arbitrary TestVarCol where
+  arbitrary = do
+        col <- elements colour
+        return $ TestVarCol(col, colorT col)
+
+newtype TestVarVIdent = TestVarVIdent (String, Ident)
+  deriving (Ord, Eq, Show)
+
+instance Arbitrary TestVarVIdent where
+  arbitrary = do 
+        c <- elements vIdentFirst
+        cs <- listOf $ elements nameChars
+        let vIdent = c:cs
+        return $ TestVarVIdent(vIdent, vIdent)
+
+newtype TestVarVIdentMany = TestVarVIdentMany (String, [Ident])
+  deriving (Ord, Eq, Show)
+
+instance Arbitrary TestVarVIdentMany where 
+  arbitrary = do 
+        c <- elements vIdentFirst
+        cs <- listOf $ elements nameChars
+        let vIdent = c:cs
+        let group = "["++vIdent++"]" -- With only one element atm.
+        return $ TestVarVIdentMany(group, [vIdent])
+
+newtype TestVarSIdent = TestVarSIdent (String, Ident)
+  deriving (Ord, Eq, Show)
+
+instance Arbitrary TestVarSIdent where
+  arbitrary = do 
+        c <- elements sIdentFirst
+        cs <- listOf $ elements nameChars
+        let vIdent = c:cs
+        if vIdent `elem` reserved then do 
+                cc <- elements nameChars
+                return $ TestVarSIdent(vIdent++[cc], vIdent++[cc])
+        else return $ TestVarSIdent(vIdent, vIdent)
+
+newtype TestPrim = TestPrim (String, Expr)
+
+instance Arbitrary TestPrim where
+  arbitrary = do 
+        c <- elements numberString
+        cs <- listOf $ elements numberString
+        let prim = c:cs
+        return $ TestPrim(prim, Const $ read prim)
+
+newtype TestVarDef = TestVarDef (String, Definition)
+
+instance Arbitrary TestVarDef where
+  arbitrary = do
+    def <- elements definitions
+    case def of
+        "viewdef" -> do
+                (TestVarVIdent (sv,v)) <- arbitrary
+                (TestPrim (se1,e1)) <- arbitrary
+                (TestPrim (se2,e2)) <- arbitrary
+                let definition = def++" "++sv++" "++se1++" "++se2
+                return $ TestVarDef(definition, Viewdef v e1 e2)
+        "rectangle" -> do
+                (TestVarCol (sc, c)) <- arbitrary
+                (TestVarSIdent (sv,v)) <- arbitrary
+                (TestPrim (se1,e1)) <- arbitrary
+                (TestPrim (se2,e2)) <- arbitrary
+                (TestPrim (se3,e3)) <- arbitrary
+                (TestPrim (se4,e4)) <- arbitrary
+                let definition = def++" "++sv++" "++se1++" "++se2++" "++se3++" "++se4++" "++sc
+                return $ TestVarDef(definition, Rectangle v e1 e2 e3 e4 c)
+        "circle" -> do
+                (TestVarCol (sc, c)) <- arbitrary
+                (TestVarSIdent (sv,v)) <- arbitrary
+                (TestPrim (se1,e1)) <- arbitrary
+                (TestPrim (se2,e2)) <- arbitrary
+                (TestPrim (se3,e3)) <- arbitrary
+                let definition = def++" "++sv++" "++se1++" "++se2++" "++se3++" "++sc
+                return $ TestVarDef(definition, Circle v e1 e2 e3 c)
+        "view" -> do
+                (TestVarVIdent (sv,v)) <- arbitrary
+                let definition = def++" "++sv
+                return $ TestVarDef(definition, View v)
+        "group" -> do
+                (TestVarVIdent (sv,v)) <- arbitrary
+                (TestVarVIdentMany (svs,vs)) <- arbitrary
+                let definition = def++" "++sv++" "++svs
+                return $ TestVarDef(definition, Group v vs)
+
+
+newtype TestDefCom = TestDefCom (String, DefCom)
+    deriving (Eq, Show)
+
+instance Arbitrary TestDefCom where
+  arbitrary = do
+        (TestVarDef (sv,v)) <- arbitrary
+        return $ TestDefCom(sv++" ", Def v)
+
+
+newtype TestProgram = TestProgram (String, Program)
+    deriving (Eq, Show)
+
+instance Arbitrary TestProgram where
+  arbitrary = do
+        (TestDefCom (sv,v)) <- arbitrary
+        return $ TestProgram(sv, [v])
+
+prop_pProg :: TestProgram -> Bool
+prop_pProg (TestProgram (s,r)) =
+    parseStringRight s == r
+
+test :: IO ()
+test = quickCheck prop_pProg
+
+--To avoid parseError not being deriving Eq...
+parseStringRight :: String -> Program
+parseStringRight s = 
+    case P.parseString s of
+        Left _ -> []
+        Right p -> p
+\end{minted}
+\end{verbatim}
+
+\newpage
+\section{SalsaInterp\_test.hs}
+\begin{verbatim}
+\begin{minted}{haskell}
+module SalsaInterp_test (test)
+where
+
+--import Test.HUnit
+import SalsaInterp
+import SalsaAst
+import Gpx
+
+--Can make a standard view
+test1 =  ([("Default",0,0)],[])
+     ==  runProg 1
+    [ Def (Viewdef "Default" (Const 0) (Const 0))]
+--Frame rate does not touch view definitions
+test2 = ([("Default",0,0)],[]) 
+     ==  runProg 100
+    [ Def (Viewdef "Default" (Const 0) (Const 0))]
+--Can make multiple views
+test3 = ([("Default",0,0), ("New",100,100)],[]) 
+     ==  runProg 100
+    [ Def (Viewdef "Default" (Const 0) (Const 0)),Def (Viewdef "New" (Const 100) (Const 100))]
+--Can make a rectangle with correct active view
+test4 = ([("Default",100,100)],[[DrawRect 20 20 20 20 "Default" "blue"]]) 
+     ==  runProg 1
+    [ Def (Viewdef "Default" (Const 100) (Const 100)), Def (Rectangle "box" (Const 20) (Const 20) (Const 20) (Const 20) Blue)]
+--Can make a circle
+test5 = ([("Default",100,100)],[[DrawCirc 20 20 50 "Default" "orange"]]) 
+     ==  runProg 1
+    [ Def (Viewdef "Default" (Const 100) (Const 100)), Def (Circle "oval" (Const 20) (Const 20) (Const 50) Orange)]
+--Can make a group (of views), which is set to the active view. One frame with same shape active on both views.
+test6 = ([("Default",200,200), ("New",100,100)],[[DrawCirc 20 20 50 "Default" "orange", DrawCirc 20 20 50 "New" "orange"]]) 
+     ==  runProg 1
+    [ Def (Viewdef "Default" (Const 200) (Const 200)), Def (Viewdef "New" (Const 100) (Const 100)), Def (Group "Group_A" ["Default", "New"]), Def (View "Group_A"), Def (Circle "oval" (Const 20) (Const 20) (Const 50) Orange)]
+--Test Active views. Only for the last active view should the circle be drawn
+test7 = ([("Default",200,200), ("New",100,100)],[[DrawCirc 20 20 50 "New" "orange"]]) 
+     ==  runProg 1
+    [ Def (Viewdef "Default" (Const 200) (Const 200)), Def (Viewdef "New" (Const 100) (Const 100)), Def (Group "Group_A" ["Default", "New"]), Def (View "Group_A"), Def (View "New"), Def (Circle "oval" (Const 20) (Const 20) (Const 50) Orange)]
+--Shows that it is not the last defined nor the first defined view that stays active. It is the last activated view that counts.
+test8 = ([("Default",200,200), ("New",100,100)],[[DrawCirc 20 20 50 "Default" "orange"]]) 
+     ==  runProg 1
+    [ Def (Viewdef "Default" (Const 200) (Const 200)), Def (Viewdef "New" (Const 100) (Const 100)), Def (Group "Group_A" ["Default", "New"]), Def (View "Group_A"), Def (View "Default"), Def (Circle "oval" (Const 20) (Const 20) (Const 50) Orange)]
+--Show multiple shapes on same view, the last active, and frame
+test9 = ([("Default",200,200), ("New",100,100)],[[DrawCirc 20 20 50 "Default" "orange", DrawRect 20 20 20 20 "Default" "blue"]]) 
+     ==  runProg 1
+    [ Def (Viewdef "Default" (Const 200) (Const 200)), Def (Viewdef "New" (Const 100) (Const 100)), Def (Group "Group_A" ["Default", "New"]), Def (View "Group_A"), Def (View "Default"), Def (Circle "oval" (Const 20) (Const 20) (Const 50) Orange), Def (Rectangle "box" (Const 20) (Const 20) (Const 20) (Const 20) Blue)]
+--Show multiple shapes on multiple views via group, same frame
+test10 = ([("Default",200,200), ("New",100,100)],[[DrawCirc 20 20 50 "Default" "orange", DrawCirc 20 20 50 "New" "orange", DrawRect 20 20 20 20 "Default" "blue", DrawRect 20 20 20 20 "New" "blue"]]) 
+     ==  runProg 1
+    [ Def (Viewdef "Default" (Const 200) (Const 200)), Def (Viewdef "New" (Const 100) (Const 100)), Def (Group "Group_A" ["Default", "New"]), Def (View "Group_A"), Def (View "Default"), Def (View "Group_A"), Def (Circle "oval" (Const 20) (Const 20) (Const 50) Orange),Def (Rectangle "box" (Const 20) (Const 20) (Const 20) (Const 20) Blue)]
+--Show move command, abs, 1 frame
+test11 = ([("Default",100,100)],[[DrawCirc 20 20 50 "Default" "orange"], [DrawCirc 10 5 50 "Default" "orange"]]) 
+     ==  runProg 1
+    [ Def (Viewdef "Default" (Const 100) (Const 100)), Def (Circle "oval" (Const 20) (Const 20) (Const 50) Orange), Com (Move ["oval"] (Abs (Const 10) (Const 5)))]
+--Show move command, Rel, 1 frame
+test12 = ([("Default",100,100)],[[DrawCirc 20 20 50 "Default" "orange"], [DrawCirc 30 30 50 "Default" "orange"]]) 
+     ==  runProg 1
+    [ Def (Viewdef "Default" (Const 100) (Const 100)), Def (Circle "oval" (Const 20) (Const 20) (Const 50) Orange), Com (Move ["oval"] (Rel (Const 10) (Const 10)))]
+----Show shape on same view on multiple frames via move command, Rel, 5 frames
+test13 = ([("Default",100,100)],[[DrawCirc 20 20 50 "Default" "orange"],[DrawCirc 22 22 50 "Default" "orange"], [DrawCirc 24 24 50 "Default" "orange"], [DrawCirc 26 26 50 "Default" "orange"], [DrawCirc 28 28 50 "Default" "orange"], [DrawCirc 30 30 50 "Default" "orange"]]) 
+     ==  runProg 5
+    [ Def (Viewdef "Default" (Const 100) (Const 100)), Def (Circle "oval" (Const 20) (Const 20) (Const 50) Orange), Com (Move ["oval"] (Rel (Const 10) (Const 10)))]
+--Show shape on multiple views on multiple frames via move command, Rel, 5 frames
+test14 = ([("Default",100,100), ("New",100,100)],[[DrawCirc 20 20 50 "Default" "orange", DrawCirc 20 20 50 "New" "orange"],[DrawCirc 22 22 50 "Default" "orange", DrawCirc 22 22 50 "New" "orange"], [DrawCirc 24 24 50 "Default" "orange", DrawCirc 24 24 50 "New" "orange"], [DrawCirc 26 26 50 "Default" "orange", DrawCirc 26 26 50 "New" "orange"], [DrawCirc 28 28 50 "Default" "orange", DrawCirc 28 28 50 "New" "orange"], [DrawCirc 30 30 50 "Default" "orange", DrawCirc 30 30 50 "New" "orange"]]) 
+     ==  runProg 5
+    [ Def (Viewdef "Default" (Const 100) (Const 100)), Def (Viewdef "New" (Const 100) (Const 100)), Def (Group "Group_A" ["Default", "New"]), Def (View "Group_A"), Def (Circle "oval" (Const 20) (Const 20) (Const 50) Orange), Com(Move ["oval"] (Rel (Const 10) (Const 10)))]
+--Show multiple shapes, one after the other, on multiple frames on differenc views
+test15 = ([("Default",100,100), ("New",100,100)],[[DrawRect 40 40 20 20 "Default" "blue", DrawCirc 20 20 50 "New" "orange"],[DrawRect 40 40 20 20 "Default" "blue", DrawCirc 22 22 50 "New" "orange"], [DrawRect 40 40 20 20 "Default" "blue", DrawCirc 24 24 50 "New" "orange"], [DrawRect 40 40 20 20 "Default" "blue", DrawCirc 26 26 50 "New" "orange"], [DrawRect 40 40 20 20 "Default" "blue", DrawCirc 28 28 50 "New" "orange"], [DrawRect 40 40 20 20 "Default" "blue", DrawCirc 30 30 50 "New" "orange"], [DrawRect 42 42 20 20 "Default" "blue", DrawCirc 30 30 50 "New" "orange"], [DrawRect 44 44 20 20 "Default" "blue", DrawCirc 30 30 50 "New" "orange"], [DrawRect 46 46 20 20 "Default" "blue", DrawCirc 30 30 50 "New" "orange"], [DrawRect 48 48 20 20 "Default" "blue", DrawCirc 30 30 50 "New" "orange"], [DrawRect 50 50 20 20 "Default" "blue", DrawCirc 30 30 50 "New" "orange"]]) 
+     ==  runProg 5
+    [ Def (Viewdef "Default" (Const 100) (Const 100)), Def (Rectangle "box" (Const 40) (Const 40) (Const 20) (Const 20) Blue),  Def (Viewdef "New" (Const 100) (Const 100)), Def (Circle "oval" (Const 20) (Const 20) (Const 50) Orange), Com(Move ["oval"] (Rel (Const 10) (Const 10))), Def (View "Default"), Com(Move ["box"] (Rel (Const 10) (Const 10)))]
+--Show command Par; multiple shapes, at the same time, on multiple frames on differenc views
+test16 = ([("Default",100,100), ("New",100,100)],[[DrawRect 40 40 20 20 "Default" "blue", DrawCirc 20 20 50 "New" "orange"],[DrawRect 35 35 20 20 "Default" "blue", DrawCirc 25 25 50 "New" "orange"], [DrawRect 30 30 20 20 "Default" "blue", DrawCirc 30 30 50 "New" "orange"]]) 
+     ==  runProg 2
+    [ Def (Viewdef "Default" (Const 100) (Const 100)), Def (Rectangle "box" (Const 40) (Const 40) (Const 20) (Const 20) Blue),  Def (Viewdef "New" (Const 100) (Const 100)), Def (Circle "oval" (Const 20) (Const 20) (Const 50) Orange), Def (Group "Group_A" ["Default", "New"]), Def (View "Group_A"), Com (Par (Move ["box"] (Abs (Const 30) (Const 30))) (Move ["oval"] (Abs (Const 30) (Const 30))))]
+--Show command At.
+
+test17 = ([("Default",100,100), ("New",100,100)],[[DrawRect 40 40 20 20 "Default" "blue", DrawRect 40 40 20 20 "New" "blue"],[DrawRect 40 40 20 20 "Default" "blue", DrawRect 45 45 20 20 "New" "blue"], [DrawRect 40 40 20 20 "Default" "blue", DrawRect 50 50 20 20 "New" "blue"]]) 
+     ==  runProg 2
+    [ Def (Viewdef "Default" (Const 100) (Const 100)), Def (Viewdef "New" (Const 100) (Const 100)), Def (Group "Group_A" ["Default", "New"]), Def (View "Group_A"), Def (Rectangle "box" (Const 40) (Const 40) (Const 20) (Const 20) Blue), Com (At (Move ["box"] (Abs (Const 50) (Const 50))) "New")]
+
+
+--Taken form appendice a of assignment
+test19 = ([("Default", 400, 400)], [[DrawRect 10 400 20 20 "Default" "green"], [DrawRect 10 200 20 20 "Default" "green"], [DrawRect 110 200 20 20 "Default" "green"], [DrawRect 110 400 20 20 "Default" "green"], [DrawRect 10 400 20 20 "Default" "green"]])
+     ==  runProg 1
+    [ Def (Viewdef "Default" (Const 400) (Const 400)), Def (Rectangle "box" (Const 10) (Const 400) (Const 20) (Const 20) Green), Com (Move ["box"] (Abs (Const 10) (Const 200))), Com (Move ["box"] (Rel (Const 100) (Const 0))), Com (Move ["box"] (Abs (Const 110) (Const 400))), Com (Move ["box"] (Rel (Minus (Const 0) (Const 100)) (Const 0)))]
+--Taken from appendice b of assignment
+test20 = ([("Default",400,400)],[[DrawRect 10 400 20 20 "Default" "green"],[DrawRect 10 200 20 20 "Default" "green"],[DrawRect 110 200 20 20 "Default" "green"],[DrawRect 110 400 20 20 "Default" "green"],[DrawRect 10 400 20 20 "Default" "green"]])
+     ==  runProg 1
+    [ Def (Viewdef "Default" (Const 400) (Const 400)), Def (Rectangle "box" (Const 10) (Const 400) (Const 20) (Const 20) Green), Com (Move ["box"] (Abs (Const 10) (Const 200))), Com (Move ["box"] (Rel (Const 100) (Const 0))), Com (Move ["box"] (Abs (Const 110) (Const 400))), Com (Move ["box"] (Rel (Minus (Const 0) (Const 100)) (Const 0)))]
+
+
+tests :: [Bool]
+tests = [test1,test2,test3,test4,test5,test6,test7,test8,test9,test10,test11,test12,test13,test14,test15,test16,test17, test19, test20]
+
+test :: [Bool]
+test = tests
+\end{minted}
+\end{verbatim}
+
+\newpage
+\section{test.erl}
+\begin{verbatim}
+\begin{minted}{erlang}
+-module(test).
+
+-include_lib("eunit/include/eunit.hrl").
+-import(at_server,[start/1, stop/1, begin_t/1, doquery/2, query_t/3, update_t/3, commit_t/2]).
+-import(at_extapi,[abort/2, tryUpdate/2, ensureUpdate/2, choiceUpdate/3]).
+
+
+%%% Test start and stop %%%
+start_stop1_test() -> ?assertEqual(prop_start_stop(0), {ok,0}).
+start_stop2_test() -> ?assertEqual(prop_start_stop(atom), {ok,atom}).
+
+%
+prop_start_stop(State) -> 
+    {ok, Pid} = start(State),
+    stop(Pid).
+
+%%% Test doquery %%%
+doquery1_test() -> ?assertEqual(prop_query1(0), {ok,1}).
+doquery2_test() -> ?assertEqual(prop_query2(a), {ok,a}).
+doquery_error_test() -> ?assertEqual(prop_query_error1(0), error).
+
+%
+prop_query1(State) -> 
+    {ok, Pid} = start(State),
+    doquery(Pid, fun(X) -> X+1 end).
+
+prop_query2(State) -> 
+    {ok, Pid} = start(State),
+    doquery(Pid, fun(X) -> X end).
+
+prop_query_error1(State) -> 
+    {ok, Pid} = start(State),
+    doquery(Pid, fun() -> throw(error) end).
+
+%%% Test doquery and stop (not touching state) %%%
+doquery_stop1_test_() -> %Does not crash after multiple calls
+        {ok, AT} = start(0),
+        doquery_stop1_gen(10000, AT).
+doquery_stop2_test() -> %Not touching state
+        {ok, AT} = start(0),
+        ?assertEqual(doquery_stop2_loop(10000, AT),{ok, 0}).
+doquery_stop3_test() -> %Errorfull queries do not touch the state
+        {ok, AT} = start(0),
+        ?assertEqual(doquery_stop3_loop(10000, AT), {ok, 0}). 
+
+%
+doquery_stop1_gen(N, AT) ->
+   {generator,
+    fun () ->
+        if N > 0 ->
+               Fun = doquery(AT, fun(X) -> X+1 end),
+               [?_assertEqual(Fun, {ok,1})
+                | doquery_stop1_gen(N-1, AT)];
+           true ->
+               []
+        end
+    end}.
+
+doquery_stop2_loop(N, AT) ->
+    if N > 0 ->
+           doquery(AT, fun(X) -> X+1 end),
+           doquery_stop2_loop(N-1, AT);
+       true ->
+           stop(AT)
+    end.
+
+doquery_stop3_loop(N, AT) ->
+    if N > 0 ->
+           doquery(AT, fun() -> throw(error) end),
+           doquery_stop2_loop(N-1, AT);
+       true ->
+           stop(AT)
+    end.
+
+%%% Test begin_t and uniqueness of returned references %%%
+begin_t2_test_() ->
+    {ok, AT} = start(0),
+    begin_t2_gen(10000, AT, []).
+
+%
+begin_t2_gen(N, AT, Refs) ->
+       {generator,
+        fun () ->
+            if N > 0 ->
+                    {ok, Ref} = begin_t(AT),
+                    NewRefs = [Ref | Refs],
+                    [?_assertNot(lists:member(Ref,Refs))
+                     | begin_t2_gen(N-1, AT, NewRefs)];
+               true ->
+                   []
+            end
+        end}.
+
+
+%%% Test query_t. Assumes begin_t works for these cases. %%%
+query_t_test_() -> 
+    {setup,
+    fun() -> {ok, AT} = start(0), AT end,
+    fun(AT) -> exit(AT, kill) end,
+    fun(AT) ->
+    [?_assert(prop_query_t1(AT) =:= {ok,1}), %Test return {ok, result}
+     ?_assertEqual(prop_query_t_error(AT), aborted), %Test return aborted on function error
+     ?_assertEqual(prop_query_t2(AT), {ok,0}), %Test server state is not touched
+     ?_assertEqual(prop_query_t_aborted(AT), aborted)] %Test if error function aborts transaction
+    end}.
+
+query_t2_test_() -> %Tests if transaction state is touched by query_t
+    {ok, AT} = start(0),
+    {ok, Ref} = begin_t(AT),
+    prop_query_t2_gen(10000, AT, Ref).
+
+%
+prop_query_t1(AT) -> 
+    {ok, Ref} = begin_t(AT),
+    query_t(AT, Ref, fun(X) -> X+1 end).
+
+prop_query_t_error(AT) -> 
+    {ok, Ref} = begin_t(AT),
+    query_t(AT, Ref, fun() -> throw(error) end).
+
+prop_query_t2(AT) -> 
+    {ok, Ref} = begin_t(AT),
+    prop_query_t_loop(10000, AT, Ref).
+
+prop_query_t_loop(N, AT, Ref) -> %Should return same result as always
+    if N > 0 ->
+           query_t(AT, Ref, fun(X) -> X+1 end),
+           prop_query_t_loop(N-1, AT, Ref);
+       true ->
+           doquery(AT, fun(X) -> X end) 
+    end.
+
+prop_query_t2_gen(N, AT, Ref) -> %Server state should not be touched by query_t
+   {generator,
+    fun () ->
+        if N > 0 ->
+               Fun = query_t(AT, Ref, fun(X) -> X+1 end),
+               [?_assertEqual(Fun, {ok,1})
+                | prop_query_t2_gen(N-1, AT, Ref)];
+           true ->
+                exit(AT, kill),
+                []
+        end
+    end}.
+
+prop_query_t_aborted(AT) ->
+    {ok, Ref} = begin_t(AT),
+    query_t(AT, Ref, fun() -> throw(error) end),
+    query_t(AT, Ref, fun(X) -> X+1 end).
+
+
+%%% Test update_t %%%
+update_t_test_() -> 
+    {setup,
+    fun() -> {ok, AT} = start(0), AT end,
+    %fun () -> {ok, AT} = start(0) end,
+    fun (AT) -> exit(AT, kill) end,
+    fun(AT) ->
+    [?_assertEqual(prop_update_t(AT), {ok,1}), %Test transaction state is updated
+     ?_assertEqual(prop_update_t_aborted(AT), aborted)] %Test transaction is aborted with failed update.
+    end}.
+
+update_t2_test_() -> %Test state is continous updated
+    {ok, AT} = start(0),
+    {ok, Ref} = begin_t(AT),
+    prop_update_t_gen(1, AT, Ref).    
+
+update_t3_test() -> %Server state should not be touched by update_t
+    {ok, AT} = start(0),
+    {ok, Ref} = begin_t(AT),
+    prop_update_t_loop(100, AT, Ref),
+    ?_assertEqual(stop(AT), {ok,0}).
+
+%
+prop_update_t(AT) ->
+    {ok, Ref} = begin_t(AT),
+    update_t(AT, Ref, fun(X) -> X+1 end),
+    query_t(AT, Ref, fun(X) -> X end).
+
+
+prop_update_t_aborted(AT) ->
+    {ok, Ref} = begin_t(AT),
+    update_t(AT, Ref, fun() -> throw(error) end),
+    query_t(AT, Ref, fun(X) -> X+1 end).
+
+
+prop_update_t_gen(N, AT, Ref) -> 
+   {generator,
+    fun () ->
+        if N < 10000 ->
+                update_t(AT, Ref, fun(X) -> X+1 end),
+                Fun = query_t(AT, Ref, fun(X) -> X end), %Dummy function
+                [?_assertEqual(Fun, {ok, N})
+                 | prop_update_t_gen(N+1, AT, Ref)];
+           true ->
+                exit(AT, kill),
+                []
+        end
+    end}.
+
+prop_update_t_loop(N, AT, Ref) ->
+    if N > 0 ->
+           update_t(AT, Ref, fun(X) -> X+1 end),
+           prop_update_t_loop(N-1, AT, Ref);
+       true -> ok
+    end.
+
+
+%%% Test commit_t. Assumes update_t works %%%
+commit_t_test_() -> 
+    {setup,
+    fun() -> {ok, AT} = start(0), AT end,
+    %fun () -> {ok, AT} = start(0) end,
+    fun (AT) -> exit(AT, kill) end,
+    fun(AT) ->
+    [?_assertEqual(prop_commit_t1(AT), ok), %Test commit result
+     ?_assertEqual(prop_commit_t2(AT), aborted), %Test commit result
+     ?_assertEqual(prop_commit_t3(AT, a), {ok, a}) %Test if state is commited
+    ]
+    end}.
+
+commit_t2_test_() -> %Tests all trans are aborted when commit happens
+    {ok, AT} = start(0),
+    Refs = prop_commit_t4(AT),
+    prop_commit_t4_gen(AT, Refs).
+
+%
+
+prop_commit_t1(AT) ->
+    {ok, Ref} = begin_t(AT),
+    update_t(AT, Ref, fun(X) -> X+1 end),
+    commit_t(AT,Ref).
+
+prop_commit_t2(AT) ->
+    {ok, Ref} = begin_t(AT),
+    update_t(AT, Ref, fun() -> throw(error) end),
+    commit_t(AT, Ref).
+
+prop_commit_t3(AT, Val) ->
+    {ok, Ref} = begin_t(AT),
+    update_t(AT, Ref, fun(_) -> Val end),
+    commit_t(AT,Ref),
+    doquery(AT, fun(X) -> X end). %Read current server state
+
+prop_commit_t4(AT) ->
+    {ok, Ref} =  begin_t(AT),
+    update_t(AT, Ref, fun(X) -> X+1 end),
+    Refs = prop_commit_t4_loop(30, AT, []),
+    [Ref| Refs].
+
+prop_commit_t4_loop(N, AT, Refs) -> %Creates a lot of transactions
+    if N > 0 ->
+           {ok, Ref} =  begin_t(AT),
+           prop_query_t_loop(N-1, AT, [Ref | Refs]);
+       true ->
+           Refs
+    end.
+
+prop_commit_t4_gen(AT, References) -> %Server state should not be touched by query_t
+   {generator,
+    fun () ->
+        if length(References) > 0 ->
+               [Ref | Refs] = References,
+               Fun = query_t(AT, Ref, fun(X) -> X end), %Dummy function
+               [?_assertEqual(Fun, aborted)
+                | prop_commit_t4_gen(AT, Refs)];
+           true ->
+                []
+        end
+    end}.
+
+
+%%%%%%%%%%%%% at_extrapi %%%%%%%%%%
+
+%%% Test abort %%%
+abort_test() -> %Test if a given transaction is aborted
+    {ok, AT} = start(0),
+    {ok, Ref} =  begin_t(AT),
+    abort(AT, Ref),
+    Fun = query_t(AT, Ref, fun(X) -> X end), %Dummy function
+    ?assertEqual(Fun, aborted).
+
+%%% Test tryUpdate %%%
+tryUpdate_test_() ->
+    {setup,
+    fun() -> {ok, AT} = start(0), AT end,
+    %fun () -> {ok, AT} = start(0) end,
+    fun (AT) -> exit(AT, kill) end,
+    fun(AT) ->
+    [?_assertEqual(prop_tryUpdate(AT), ok), %Test result if successfull
+     ?_assertEqual(prop_tryUpdate_error(AT), error), %Test result if error function
+     {timeout, 10,?_assertEqual(prop_tryUpdate_aborted(AT), aborted)}, %Test aborted
+     {timeout, 10,?_assertEqual(prop_tryUpdate_aborted2(AT), {ok, a})}, %Test that the server state was actually changed
+     ?_assertEqual(prop_tryUpdate_val(AT), {ok,1}) %Test if value is updated
+    ]
+    end}.
+
+%
+prop_tryUpdate(AT) ->
+    tryUpdate(AT, fun(_) -> 1 end).
+
+prop_tryUpdate_error(AT) ->
+    tryUpdate(AT, fun() -> throw(error) end).
+
+prop_tryUpdate_aborted(AT) ->
+    spawn(fun() -> prop_tryUpdate_aborted_spawn(AT) end), %spawn competitor
+    tryUpdate(AT, fun(_) -> timer:sleep(2000), b end). %sleep 2 seconds
+    
+
+prop_tryUpdate_aborted_spawn(AT) ->
+    {ok, Ref} =  begin_t(AT),
+    timer:sleep(2000), %Sleep a little so tryUpdate gets ahead (but has to run 2 times with function).
+    update_t(AT, Ref, fun(_) -> a end),
+    commit_t(AT, Ref),
+    exit(normal). %kill self
+
+prop_tryUpdate_aborted2(AT) ->
+    prop_tryUpdate_aborted(AT),
+    doquery(AT, fun(X) -> X end).
+
+prop_tryUpdate_val(AT) ->
+    prop_tryUpdate(AT),
+    doquery(AT, fun(X) -> X end).
+
+
+%%% Test ensureUpdate %%%
+ensureUpdate_test_() ->
+    {setup,
+    fun() -> {ok, AT} = start(0), AT end,
+    %fun () -> {ok, AT} = start(0) end,
+    fun (AT) -> exit(AT, kill) end,
+    fun(AT) ->
+    [?_assertEqual(prop_ensureUpdate(AT), ok), %Test result if successfull
+     ?_assertEqual(prop_ensureUpdate_error(AT), error), %Test result on error function
+     ?_assertEqual(prop_ensureUpdate_val(AT), {ok, b}), %Test update actually happens
+     {timeout, 10,?_assertEqual(prop_ensureUpdate_aborted(AT), ok)}, %Test update is ensure by trying again first time another commit happens.
+     ?_assertEqual(prop_ensureUpdate_read(AT), {ok,c}) %Test if value is updated
+    ]
+    end}.
+
+%
+prop_ensureUpdate(AT) ->
+    ensureUpdate(AT, fun(_) -> a end).
+
+prop_ensureUpdate_error(AT) ->
+    ensureUpdate(AT, fun() -> throw(error) end).
+
+prop_ensureUpdate_val(AT) ->
+    ensureUpdate(AT, fun(_) -> b end),
+    doquery(AT, fun(X) -> X end).
+
+prop_ensureUpdate_aborted(AT) ->
+    spawn(fun() -> prop_ensureUpdate_aborted_spawn(AT) end), %spawn competitor
+    ensureUpdate(AT, fun(_) -> timer:sleep(2000), c end). %sleep 2 seconds
+    
+prop_ensureUpdate_aborted_spawn(AT) ->
+    {ok, Ref} =  begin_t(AT),
+    timer:sleep(2000), %Sleep a little so tryUpdate gets ahead.
+    update_t(AT, Ref, fun(_) -> 1 end),
+    commit_t(AT, Ref),
+    exit(normal). %kill self
+
+prop_ensureUpdate_read(AT) ->
+    doquery(AT, fun(X) -> X end).
+
+
+%%% Test choiceUpdate %%%
+choiceUpdate_test_() ->
+    {setup,
+    fun() -> {ok, AT} = start(0), AT end,
+    %fun () -> {ok, AT} = start(0) end,
+    fun (AT) -> exit(AT, kill) end,
+    fun(AT) ->
+    [?_assertEqual(prop_choiceUpdate_multi(AT), ok), %Return value on success
+     ?_assertEqual(prop_choiceUpdate_read(AT), {ok, c}), %Is the value actually updated to the fastest one?
+     ?_assertEqual(prop_choiceUpdate_multi2(AT), ok), %Try again with another list
+     ?_assertEqual(prop_choiceUpdate_read(AT), {ok, b})
+    ]
+    end}.
+
+%
+
+prop_choiceUpdate_multi(AT) ->
+    List = [{a,1000}, {b,2000}, {c,0}, {d, 900}],
+    choiceUpdate(AT, fun(_, {Y,T}) -> timer:sleep(T), Y end, List).
+
+prop_choiceUpdate_multi2(AT) ->
+    List = [{a,3000}, {b,100}, {c,4000}, {d, 900}],
+    choiceUpdate(AT, fun(_, {Y,T}) -> timer:sleep(T), Y end, List).
+
+prop_choiceUpdate_read(AT) ->
+    doquery(AT, fun(X) -> X end).
+
+\end{minted}
+\end{verbatim}
+
+\end{document}

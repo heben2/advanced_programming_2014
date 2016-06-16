@@ -1,0 +1,31 @@
+left recursive grammars -> Lav EBNF - use chainl1
+
+Def
+
+Defs needs to look ahead to determine which branch to chose (because Defs cannot be empty). This is possible to handle via the function many1, so no further attention is needed here.
+
+Curve and Expr are unambigious and also left recursive. 
+Therefore I have factorized the grammar to the following.
+
+% Defs ::= e | Def Defs
+
+Curve ::= CurveConst CurveOp | '(' Curve ')'
+CurveOp ::= e 
+            | '++' Curve 
+            | '^' Curve
+            | '->' Point
+            | '**' Expr
+            | 'refv' Expr
+            | 'refh' Expr
+            | 'rot' Expr
+CurveConst ::= Point | Ident
+
+Expr ::= ExprConst ExprOp | '(' Expr ')'
+ExprOp ::=  e 
+            | '+' Expr ExprOp
+            | '*' Expr ExprOp
+ExprConst ::= 'width' Curve 
+            | 'height' Curve 
+            | Number
+
+SKAL JEG HAVE CurveOp OG ExprOp EFTERFØLGENDE I funktionerne??

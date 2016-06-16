@@ -1,0 +1,54 @@
+\documentclass[a4paper, 10pt]{article}
+\usepackage[utf8x]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{ucs}
+\usepackage[danish]{babel}
+\usepackage[parfill]{parskip}
+\usepackage{minted}
+
+\renewenvironment{verbatim}{}{}
+
+\widowpenalty=1000
+\clubpenalty=1000
+
+\author{Henrik Bendt (gwk553)}
+\title{Counting Parentheses\\Assignment 2\\Advanced Programming}
+\date{\today}
+
+\begin{document}
+\maketitle
+\pagebreak
+
+\subsection*{Implementation}
+Main function is interpret, which parses a string with the parser given from the assignment (note the parser is edited slightly to comply hlint). After a successful parse, the parsed string is given eval via a monad with an empty environment. 
+
+The monad \texttt{APLispExec} is defined as
+\begin{verbatim}
+\begin{minted}{haskell}
+newtype APLispExec a = RC { runLisp :: Environment -> Either Error a}
+\end{minted}
+\end{verbatim}
+that is, given an environment, return either an error (which is currently just a String type) or the result.
+
+All error messages are handled as strings and in case of a fail, the interpreter will halt and print the given message.
+
+It is assumed that all arithmetic operations are on integers, i.e. no qotes or unbound variables are legal. In case of division, an error is thrown if divisor is 0. Otherwise the integers are divided using $div$, so all results are floored. 
+
+The operators $car$ and $cdr$ both uses partial functions \texttt{head} and \texttt{last}, respectively. This is because I guarantee they are not handed an empty list, by making a check first. 
+
+$Let$-expressions evaluate the given list of local bindings and give the new (local) environment to the body of the $let$-expression.
+
+$Lambda$-expressions are anonymous functions, with a given list of parameters and a function body. To apply a $lambda$-expression on arguments, use $funcall$. This can take a single argument or a list of arguments. $Funcall$ uses the functionality of $let$s, to build a local scope of the binding of arguments to parameters.
+
+\subsection*{Quality of code}
+Works on the test-examples of the assignment, except the recursive call-example, as it returns a parsing-error (``Parse error'' to be exact). As the parser is not a part of the assignment, so no further attention is given to this.
+
+The data structures where given along with structure of code, which has not been altered.
+
+I have not automated any tests and have only manually tested for a few examples, so I cannot say anything about the quality, except it worked in the manual examples.
+
+Unit testing would have been great for testing the parser, and I should have made my manual testcases to unittests, as to show (but not prove) correct functionality of the parser. Especially, I should have made about (or at least) 3 unit tests for each operator, to check border cases and a ``normal'' case. And then I should have tested for some complex programs, combining some of the already tested operators along with the complex operators like $let$, $lambda$ and $funcall$. Alas, I did not have time to do this.
+
+%DO NOT USE QUICK TEST!!
+% More important to assess tests (what have I tested, what shortcommings are present) than test.
+\end{document}

@@ -1,0 +1,104 @@
+\documentclass[a4paper, 10pt]{article}
+\usepackage[utf8x]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{ucs}
+\usepackage[danish]{babel}
+\usepackage[parfill]{parskip}
+\usepackage{minted}
+
+\renewenvironment{verbatim}{}{}
+
+\widowpenalty=1000
+\clubpenalty=1000
+
+\author{Henrik Bendt (gwk553)}
+\title{Look at Those Curves\\Assignment 1\\Advanced Programming}
+\date{\today}
+
+\begin{document}
+\maketitle
+\pagebreak
+
+\subsection*{Type Point}
+\begin{verbatim}
+\begin{minted}{haskell}
+data Point = Point(Double, Double)
+    deriving (Show)
+\end{minted}
+\end{verbatim}
+Is a data type descriping a point as a constructor Point with a tuple of doubles.
+It derives Show (mostly for debugging purposes) and has a custom instance of Eq, so the floating points of the double can be compared with care only down to the first two digits after the decimal point.
+
+An alternative version of Point could be without a tuple:
+data Point = Point Double Double
+This would make an equivalent data type and I just chose the other one. This one however, contains less characters (no parentheses) and could be easier to read/write in the code.
+
+\subsection*{Type Curve}
+\begin{verbatim}
+\begin{minted}{haskell}
+type Curve = [Point]
+\end{minted}
+\end{verbatim}
+Is a type describing a list of type Point elements. I have chosen to only contain the list of points, not the line segments, in the type Curve. This makes it easier to maintain, but moves the work of creating the curve lines (from the points) to other functions, like toSVG. 
+
+So an alternative would be to contain the list of curve lines, that is tuples of points.
+
+Note that my implementation does not require a curve to have any lines, it can be just a point.
+
+\subsection*{Type Axis}
+\begin{verbatim}
+\begin{minted}{haskell}
+data Axis = Vertical | Horizontal
+\end{minted}
+\end{verbatim}
+Is a data type of two possible axis, Vertical and Horizontal. It was given by the assignment.
+
+\subsection*{Function point}
+Creates a point of data type Point from a tuple of doubles.
+
+\subsection*{Function curve}
+Creates a list of type Curve by prepending a given point of type Point to the given list of Points. This is straight forward, because Curve only contains a list of points, not line segments.
+
+\subsection*{Function connect}
+Connects two given curves. This is, because of the chosen type of Curve, straight forward concatination.
+
+\subsection*{Function rotate}
+Rotates a given curve clockwise (that is, backwards of normal mathematical convention) by the given degree about origo. This is done by mapping the negated standard rotation on the curve points.
+
+
+\subsection*{Function translate}
+Moves a given curve by a vector from the curves starting point to the given point. This makes the new point the new starting point. This is done by finding the difference between the starting point and the given point, and moving all points of the curve by this.
+
+\subsection*{Function reflect}
+Reflects the given curve by the given axis line from the given coordinate. For example, if the axis is Horizontal, then the given double determines where on the y-axis, the horizontal line should lie (and vica versa for vertical). This is done by holding the given axis constant of each point of the curve, and move the other axis the double of the difference between the current position and the given (coordinate).
+
+This was not explained very well in the assignment and at first I thought it was a point on the given axis to be reflected through.
+I used the Hilbert-method to determined, what was intended. 
+
+\subsection*{Funciton bbox}
+Returns the point of the botom left corner and the upper right corner of the given curve, to define the bounding box of the curve. If the curve is empty, return points of orio, and if only one point exists in the curve, then that point is both corners. This is done by taking max and min of all point coordinates using fold.
+
+\subsection*{Functions width and height}
+Returns the width/height of the given curve, using bbox to find the limiting corners and finding the difference between the points.
+
+\subsection*{Funciton toList}
+Returns a list of points from a given curve. This is straight forward, as my type Curve only consists of points, not line segments.
+
+\subsection*{Function toSVG}
+Not sure, if this should be in the Curve library, as it did not follow from the assignment.
+
+Returns a string representing the given SVG-format of the given curve. This is done by computing all the line segments of the curve, as the curve only consists of points.
+
+\subsection*{Function toFile}
+Writes the SVG-representation of the given curve to a given filepath. If the file is not present, it is created, otherwise it is overwriten.
+
+\subsection*{Quality of code}
+I have not used any partial functions and GHC with the flag -Wall and hlint, with no complaints. This keeps the code clean and without unhandled errors.
+
+I have used both the triangle input and the Hilbert function to test the code, but it could have been tested more thoroughly, like with unit tests.
+
+I have tried to keep the code as short and simple as possible and included each signature before each function, to keep readability high. I have also kept all assisting function and local variables to each function in its where-clause.
+
+I have left no comments in the code, as the program is very short and simple, and as this report should suffice describing all data types and functions.
+
+\end{document}

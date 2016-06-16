@@ -1,0 +1,115 @@
+\documentclass[a4paper, 10pt]{article}
+\usepackage[utf8x]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{ucs}
+\usepackage[danish]{babel}
+\usepackage[parfill]{parskip}
+\usepackage{minted}
+
+%\renewenvironment{verbatim}{}{}
+
+\widowpenalty=1000
+\clubpenalty=1000
+
+\author{Henrik Bendt (gwk553)}
+\title{Curvy Syntax\\Assignment 1\\Advanced Programming}
+\date{\today}
+
+\begin{document}
+\maketitle
+\pagebreak
+
+\subsection*{Grammar}
+I have made some small changes to the grammar.
+Defs needs to look ahead to determine which branch to chose, but as this is possible to handle via the function many1, so no further attention is needed here.
+
+Curve and Expr are unambigious and also left recursive. 
+Therefore I have factorized the grammar to the following.
+
+\begin{verbatim}
+Curve ::= CurveConst CurveOp | '(' Curve ')'
+CurveOp ::= e 
+            | '++' Curve 
+            | '^' Curve
+            | '->' Point
+            | '**' Expr
+            | 'refv' Expr
+            | 'refh' Expr
+            | 'rot' Expr
+CurveConst ::= Point | Ident
+
+Expr ::= ExprConst ExprOp | '(' Expr ')'
+ExprOp ::=  e 
+            | '+' Expr ExprOp
+            | '*' Expr ExprOp
+ExprConst ::= 'width' Curve 
+            | 'height' Curve 
+            | Number
+
+\end{verbatim}
+
+\subsection*{Implementation}
+I have chosen to use the Parsec library.
+
+The possible returned errors of parseString and parseFile are from ParseError of Parsec.
+
+The parser is divided into parser combinators for each right side in the grammar (almost, some are combined into one combinator, like \textit{refv}, \textit{refh} and \textit{rot}). These are mostly interconnected by the chain left parsetree, to handle the left recursion.
+
+For every token trailing spaces are discarded. 
+
+Parsecs \textit{try} is used in two combinators, namely \texttt{curveOp4} and \texttt{curveConst}. \textit{try} is a heavy function to use, as it can run through several trees before finding the right one, which is why I use it limited. It is nescesarry to use it in these places though. For example when it parses \textit{refv}, \textit{refh} or \textit{rot}, it consumes the ``r'', but if the operator is anyone but \textit{rot}, which has the highest precedence, it would fail, because it checks \textit{rot} first and can't backtrack without the use of \textit{try}. Same for parentheses.
+
+The interface for CurvySyntax contains only the functions \texttt{parseString} and \texttt{parseFile}, as defined in the assignment.
+
+\subsubsection*{Helper functions}
+The function \texttt{symbol} handles trailing spaces, newlines and tabs. This is used for most string tokens and at terminals.
+
+The function \texttt{parens} handles parentheses, used by curve and expr.
+
+The function \texttt{chainl2} works like \texttt{chail1}, except it takes another parser to use on the right side, after the left side is parsed, instead of using the same parser on the right side, as in \texttt{chail1}.
+
+\subsection*{Quality of code}
+If multiple right side options of a rule exists, then each right side rule is (in most instances) placed as sub parser combinator to keep the parser combinators simple.
+
+The program compiles without warnings with both \textit{hlint} as well as \textit{ghc -Wall -fno-warn-unused-do-bind}.
+
+Error messages are mostly done by the Parsec-library, as I have not included many manually defined error messages. If time allowed it, this should have been done to make more user friendly messages, but Parsec do throw descent error messages (with what it expected at a given character and what it got) as a default. But could have been expanded to give error messages on what grammar was expected instead.
+
+The parser uses only a few try-statements (where nescesarry), making it faster than if using ReadP, which traverses all subtrees (Parsec greedly traverses given subtrees, returning the first successful one).
+
+Correctness of the parser is not proven, but the test suite shows some examples of correct behavior. Unfortunately this does not say much (if anything, I could have just chosen lucky test-examples) about the correctness.
+
+I suspect the parser might contain incorrect parsings according to precedens of expressions and curve operators (please see the note on item \ref{itm:uncertain} in my test suite). As I am uncertain if this really is an error, I have not tried to correct it.
+
+\subsection*{Testsuite}
+\subsubsection*{Positive examples}
+\begin{enumerate}
+    \item\label{itm:dec} Testing decimals: "a = (1.999, 100.1000)"
+    \item\label{itm:lassoc} Testing left-association: "a = (0.0,0) ++ (1,1) ++ (2.99,2)"
+    \item\label{itm:expr} Testing expressions: "b = (1+2.3,0*2) rot width p"
+    \item\label{itm:exprprec} Testing expression precedence: "b = (1+2*3.3,1*0+2)"
+    \item\label{itm:parens} Testing parentheses: "b = ((0,2*(1+1)) ++ (x++(1,1))) $\wedge$ y"
+    \item\label{itm:defs} Testing defs: "c1 = (0,width p) where \{p = (9,9)\} c2 = c1"
+    \item\label{itm:prec1} Testing precedens: "d1 = a $\wedge$ b ++ c"
+    \item\label{itm:prec2} Testing precedens: "d2 = c ++ b $\wedge$ a"
+    \item\label{itm:prec3} Testing precedens: "e = a ++ b $\wedge$ c -> (1,1) ++ 3"
+    \item\label{itm:prec3} Testing precedens: "e = a ++ b $\wedge$ (c -> (1,1)) ** 3"
+    \item\label{itm:uncertain} Testing precedence: "f = (0,0) ++ (2*1+0*1, 42) ** width (3,3) ++ (2,2)"
+\end{enumerate}
+Note: I am uncertain of the correctness of item \ref{itm:uncertain}, as it is parsed like it was the string "c = (0,0) ++ (2*1+0*1, 42.5) ** width ((3,3) ++ (2,2))". Since expressions have precedence over curve operations, I suppose this should not be the case, and should be parsed as "c = (0,0) ++ ((2*1+0*1, 42.5) ** width (3,3)) ++ (2,2)". But if the expression was one of the point expressions, then it should parse the whole right side after \textit{width}.
+
+I have chosen this test suite, because it slowly builds on top of some simple ground cases, here item \ref{itm:dec} and item \ref{itm:expr}.
+
+Note that the suite does not contain enough tests, and especially not enough border cases, so it is not a finished test suite and therefore does not sais much about the quality of the parser. 
+
+\subsubsection*{Negative examples}
+\begin{enumerate}
+    \item Using illegal identifier name: "a = width ++ (1,1)"
+    \item Replaces expressions with curve-statements: "b = (0,(0,0))"
+    \item Replaces expressions with curve-statements: "b = (0,0) ** (1,1)"
+    \item Precence of rot is higher than translate: "c = a -> (1,1) rot 1"
+\end{enumerate}
+
+I have chosen some simple negative examples, that shows some correct precedence rules, handling of expressions vs. curves and protection of reserved words.
+
+\end{document}

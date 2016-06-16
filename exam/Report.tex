@@ -1,0 +1,201 @@
+\documentclass[a4paper, 10pt]{article}
+\usepackage[utf8x]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{ucs}
+\usepackage[danish]{babel}
+\usepackage[parfill]{parskip}
+\usepackage{minted}
+\usepackage{pdfpages}
+
+
+\widowpenalty=1000
+\clubpenalty=1000
+
+\author{Henrik Bendt\\ gwk553}
+\title{Exam in Advanced Programming}
+\date{\today}
+
+\begin{document}
+\maketitle
+\pagebreak
+
+\section{Question 1: The Salsa Language}
+
+\subsection{Grammar}
+I have edited parts of the grammar to clean it of the left recursion and make it unambigious.
+
+\begin{verbatim}
+Command ::= SIdents '->' Pos CommandOp
+        | '{' Command '}'
+
+CommandOp ::= '@' VIdent
+        | '||' Command
+
+Expr ::= Prim ExprOp
+ExprOp ::= e
+        | '+' Prim ExprOp
+        | '-' Prim ExprOp
+
+\end{verbatim}
+
+\subsection{Implementation}
+\texttt{SalsaParser} use the monadic parser library Parsec. 
+
+The interface for SalsaParser contains only \texttt{parseString} and \texttt{parseFile} as defined by the assignment. These return either the parsed program or an error of type \textit{ParseError} from Parsec.
+
+The parser is roughly divided into parser combinators for each right hand side of the grammar, where a few are combined.
+These are mostly connected by the chain left parsetree, to handle left recursion.
+
+For every token/symbol trailing spaces are discarded.
+
+I have used some helper functions from \texttt{CurvySyntax.hs} (from Absalon), namely \texttt{token}, \texttt{symbol}, \texttt{reserved} and \texttt{constituent}. I have also made the helper function \texttt{parens} to handle brackets and \texttt{chainl2} to handle left recursion, just like \texttt{cahinl1}, except the following right side can be of another parser combinator.
+
+Parsecs \textit{try} is used in the parser combinator \texttt{defcom} and \texttt{def}. This is needed to look ahead on the following symbols (just one token ahead, so there is limited overhead), as they define which path to take. %TODO verify this is enough try-statements
+
+%Make sure that not using 'keyword' is correct; that keywords can be followed by other stuff
+
+\subsection{Assessment}
+%TODO
+The program compiles without warnings with both \textit{hlint} as vell as \textit{ghc -Wall -fno-warn-unused-do-bind}.
+
+%Remember to include test suite.
+
+
+
+\section{Question 2: Interpreting Salsa}
+
+\subsection{Implementation}
+The interface to SalsaInterp contains only \texttt{Position}, \texttt{interpolate} and \texttt{runProg}, as defined by the assignment.
+
+Interpolate converts all input integers to type Double to enable precise division when calculating how much to move between frames, and then in the end use \texttt{round} to convert back to Integer for each position. This defines what pixels the position snaps to.
+
+\textit{Context} contains two parts, the read-only environment \textit{Environment} and the mutable state \textit{State}, and is defined as
+\begin{minted}{haskell}
+data Context = Context Environment State
+\end{minted}
+
+\textit{Environment} is defined as
+\begin{minted}{haskell}
+data Environment = Environment 
+        {
+            views  :: M.Map ViewName (Integer, Integer),
+            groups :: M.Map String [String],
+            shapes :: M.Map String Shape,
+            aViews :: [ViewName],
+            framerate :: Integer
+        }
+\end{minted}
+with a further description
+\begin{itemize}
+  \item \textit{views} as a map between view names and their dimensions
+  \item \textit{groups} as a map between group ids and the list of ids in the group.
+  \item \textit{shapes} as a map between the shape id and a local data type Shape. Shape contains information about the shape and looks like GpxInstr, except it does not have a view defined.
+  \item \textit{aViews}, active views, as a list of ViewName.
+  \item \textit{framerate} as an Integer
+\end{itemize}
+\textit{Environment} is a record because it makes it easy to extract data from the different groups of the record, where in many cases, only one or two groups are needed in a computation. This is also easier to pattern macth (only needed to match the overall environment) compared to a data type like Shape.
+
+\textit{State} is a map between a shape id and a list of tuples containing view names the shape is defined in along with its current positions.
+\begin{minted}{haskell}
+    type State = M.Map String [(ViewName, Position)]
+\end{minted}
+
+The state is handled by the monad \textit{SalsaCommand}, which works like a state monad, defined like as
+\begin{minted}{haskell}
+newtype SalsaCommand a = 
+        SalsaCommand { runSC :: Context -> (a, State) }
+\end{minted}
+\textit{SalsaCommand} can only manipulate with the current state of positions \texttt{State}, and cannot change the current environment \texttt{Environment}. Thus, given a context, it returns a monad containing a value of the given type along with a manipulated state.
+
+\texttt{command} computes the effect of executing a command and applies this to the current state of the context, using \textit{SalsaCommand}. It uses some helper functions for converting types of SalsaAst to types of Position, Shape or GPX, for example \texttt{calcExpr} which interprets an expression Expr and converts it to an Integer, with respect to the current context. \texttt{command} handles the three possible commands Move, At and Par, as described in the assignment.
+
+Note that the command At changes the environment for the given command, but it does not change the environment for the next commands (next key frame). This is possible by the monad \textit{SalsaCommand}, as it can change the enviroment given to its subcommands, but it cannot return any environment, only a state (and thus following the rules in the assignment).
+
+The context is handled by the monad \textit{Salsa}, also working like a state monad like \textit{SalsaCommand}, only this can manipulate the entire context including the environment. \textit{Salsa} also handles the list of frames used in the animation. It is defined as
+\begin{minted}{haskell}
+newtype Salsa a = 
+        Salsa {runS :: Context -> [Frame] -> (a, Context, [Frame])}
+\end{minted}
+
+\texttt{liftC} can lift a monad \textit{SalsaCommand} to a monad \textit{Salsa}, that is, update the current context with a manipulated state. A state is manipulated when a command is executed, and thus the new state is the next key frame. This means that all the intermediate frames must be calculated and added to the current list of frames, handled by the monad \textit{Salsa}. All shapes on all views of the new state is runned through \texttt{interpolate} and combined to one frame list, which is added to the existing frames. Note that the list of frames is build buttom up and reversed in the end by \texttt{runProg}.
+
+All definitions are computed by \texttt{definition}, which changes both the environment and state of the context, and in caes of new shapes also the frames, as these must be added to the first key frame as this is not handled by \texttt{interpolate}. This is also the place where all active views are set.
+
+\texttt{defCom} calls \texttt{definition} in case of a definition, and \texttt{liftC} in case of a command, with the command computed by \texttt{command}.
+
+\texttt{runProg} is the main function of the interpreter and this constructs the animation to return, base on the computations of the interpreter, that is the context returned by \texttt{defCom}. It runs the monad \textit{Salsa} returned by \texttt{defCom} to extract the environment and frames already calculated, and returns the Animation with the list of extracted views of the environment and the reverse list of frames.
+
+
+The interpreter does not fail if a shape to be moved does not exist and does not fail if group ids are not actual view ids, but will have unexpected behavior.
+This can be handled by a static check before interpretation and is not a focus of the assignment.
+
+\subsection{Assessment}
+%TODO
+
+
+
+
+
+\section{Question 3: Atomic Transaction Server in Erlang}
+\subsection{at\_server}
+\texttt{start} initiates the server by spawning a process running the internal serverloop \texttt{stateloop} with \textit{process\_flag(trap\_exit, true)} (to handle subprocesses). \texttt{stateloop} keeps the current state of the server, a dictionary over the current active transactions and a dictionary over current blocking processes. This implementaion limits the number of blocking processes to be just one per transaction, but could easily be expanded to handle multiple. If another process blocks an already blocked transaction, the previous is blocking process is forgotten, which is not optimal.
+
+Transaction references could have been the \textit{pId}s of their respective subprocesses, as subprocesses only accept messages from their parrent (\texttt{stateloop}), so they are protected from unwanted external processes. But as the reference should be ``guarenteed'' unique(which it is not, but close enough), to make a safe external interface, \texttt{make\_ref} is used to create transaction references, which also serves as keys in the dictionary holding each active transaction (\textit{pId}s of the subprocesses).
+
+Transactions works as individual subprocesses running in \texttt{transactionHelper} (maintaining their own state while also knowing the \textit{pId} of the server and its reference) and are all linked to the server (main process). If the server is stopped (or crashes), all running subprocess will also be stopped via the exit-functionality. 
+
+When a blocking query is received by the server, the \textit{pId} of the waiting process is added to the waiting que with the transaction references as key. When committing a transaction, all processes in the que are aborted immediately along with killing all transaction subprocesses. When a transaction is aborted because of an error function etc., the subprocess exits with the reason \textit{aborted}, which the server catches (because of link and flag) and with this recieves the transaction reference, so a waiting process can recieve the abort-message and the server can deactivate the transaction (by removing it from the dictionary).
+When the server recieves a commit, it uses function \texttt{rpcE} to keep synchronous communication, where \texttt{rpcE} works like \texttt{rpc} but can also recieve exit-statements.
+When the server stops, all blocking functions get aborted and all transactions receives the exit-statement from the server, shutting them down.
+
+\texttt{doquery} and \texttt{query\_t} blocks by using synchronous communication while \texttt{update\_t} do not block by using asynchronous communication.
+
+It is not handled on the server side when a subprocess crashes. This could be handled by looking up any blocked processes by the transaction, abort those and then remove the transaction from active transactions on the server (thus making it an invalid transaction).
+
+I assume queries must be performed at server-side and not at user-side (that is, return the state for the user to perform the function on).
+To improve the server, you could also add concurrent handling of queries to the current server, where it now runs a potential slow function and cannot revieve other queries in the meantime. The same goes for transactions. As this was not mentioned in the assignment, I have not done it.
+
+The server is not robust as it is not a part of the assignment. This could be done by making a supervisor to the server, and for example restart it with the last working state, if the server suddently crashed. This would make a more secure and stable server.
+
+\subsection{at\_extapi}
+\texttt{abort} aborts a transaction by updating it with an error function.
+
+\texttt{tryUpdate} tries to update the server by making a new transaction, try the function on it and if it succeeds, try to update and commit it. Returns \textit{error} if \texttt{query\_t} fails and else returns whatever \texttt{update\_t} or \texttt{commit\_t} returns.
+
+\texttt{ensureUpdate} calls \texttt{tryUpdate} to try and update the state. If it was aborted, it tries again, otherwise it returns whatever was returned by \texttt{tryUpdate}.
+
+\texttt{choiceUpdate}, we call this process \textit{P}, tries to update the current state by spawning a subprocess for each value in the given list \textit{List}. All subprocesses are spawned with the funcion \texttt{choiceUpdateSpawn}, which makes a new transaction and tries to update the state. After the update, the subprocess checks the state of its transaction by calling \texttt{query\_t} with a dummy-function and messages \textit{P} with the reference to its transaction if sucessful, else \textit{error}.
+After \textit{P} has spawned all subprocesses, it calls \texttt{choiceUpdateCheck} and waits for incomming messages. It commits the first received transaction and if all functions fails, it returns with \textit{aborted} (to imitate \texttt{commit\_t}). An alternative to the failure of all functions could be to try agian, but this could lead to an infinite loop. Note that remaining subprocesses should eventually die, assuming the given function terminates.
+I did not use the previous defined function \texttt{tryUpdate} for the subprocesses, as \texttt{tryUpdate} also commits, and this could lead to multiple subprocesses of \textit{P} committing, if the first functions are fast and the later functions are slow, or indeed if the given list of values is long (meaning as many subprocesses). This would break with the definition of \texttt{choiceUpdate}.
+
+\subsection{Assessment}
+All parts of the server should be working.
+
+Note that all test cases use the funciton \texttt{start}, and it is assumed, after the unit tests of it, that it works, even though the unit tests are not proving \texttt{start} to work (at all time). All starting states are set to be \textit{0}, except for some test cases of \texttt{start} and \texttt{slut}.
+Also note that unit tests do not prove the correctness of the program, but only shows instances of correct behavior. On these grounds one can only say that the program works for these specific situations, but not any others, though one can argue the probability of correctness in alike situations.
+
+I have made about 50 test cases along with some generators. There are no random input tests, only unit tests.
+
+My unit tests, which can be found in the folder and in appendices, show the following works and nothing more:
+\begin{itemize}
+  \item \texttt{start} and \texttt{stop} works on integer 0 and the atom \textit{atom}.
+  \item \texttt{doquery} works with functions incrementing state value by one or setting it to an atom. Also works for a function throwing an error. Shows that the server does not crash after 10000 calls of \texttt{doquery} and that functions for incrementing or throwing errors does not touch the server state.
+  \item \texttt{begin\_t} returns unique references, at least for the first 10000 examples.
+  \item \texttt{query\_t} returns $\{ok, 1\}$ of a function incrementing the state from 0 and that it does not touch neither the server state nor the the transaction state. Also shows that it works on the current transaction state. Shows that for an error function the return is \textit{aborted} and they do actually abort the transaction for further calls (note it is not showed that the transaction process dies).
+  \item \texttt{update\_t} updates transaction state continuesly for a function incrementing its integer (for 10000 iterations at least). Shows the transaction is aborted with a failed update (not showed that transaction process dies). Also show that the server state should not be touched by updates.
+  \item \texttt{commit\_t} returns \textit{ok} on successful commits for a state updated once and \textit{aborted} on non-existing transactions. Shows that all transactions are aborted when commit happens (does not show that all blocking transitions are unblocked).
+  \item \texttt{abort} aborts a transaction with nothing done.
+  \item \texttt{tryUpdate} returns correct values if given a function setting the current state to some atom or a function throwing an error or if another state has updated the server state before the given function finishes. Also shows that the change actually happens to the server state.
+  \item \texttt{ensureUpdate} returns \textit{ok} on successful function changing state to the atom a and returns \textit{error} on an error function. Shows that the update will happen if another transaction commits before this on the first try (note this is only tested for one iteration and it is not ensured in the test that \texttt{ensureUpdate} is actually interrupted). Do not show that it never returns \textit{aborted}.
+  \item \texttt{choiceUpdate} returns \textit{ok} on successful function changing state (commit). Also shows that for at least a small example, the fastest function is the one committed. It is not shown that result is \textit{aborted} if another commit happens.
+\end{itemize}
+
+My tests do not show anything about concurrent behavior, so I cannot prove or show if this works as intended. I can only ague from the spawning of new processes and non-blocking behavior of the server, that it could work but this proves nothing (I have manually tested with debugging prints to convince my self that some concurrency happens).
+
+My tests don't show anything about blocking behavior either, but all blocking functions use synchronous communication, which blocks, while all non-blocking functions use asynchronous communication.
+
+\newpage
+%\section{Appendices}
+\includepdf[pages={-}]{code.pdf}
+
+\end{document}

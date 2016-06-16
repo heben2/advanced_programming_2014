@@ -1,0 +1,55 @@
+\documentclass[a4paper, 10pt]{article}
+\usepackage[utf8x]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{ucs}
+\usepackage[danish]{babel}
+\usepackage[parfill]{parskip}
+\usepackage{minted}
+
+\renewenvironment{verbatim}{}{}
+
+\widowpenalty=1000
+\clubpenalty=1000
+
+\author{Henrik Bendt (gwk553)}
+\title{Super-Prime\\Assignment 3\\Advanced Programming}
+\date{\today}
+
+\begin{document}
+\maketitle
+\pagebreak
+
+\section*{Implementation}
+$minus(t_1,t_2,t_3)$ can be implemented as follows:\\
+$minus(t_1,t_2,t_3) :- add(t_3,t_2,t_1)$
+
+\texttt{mult} works by having base cases where z (0) are constant predicates and otherwise using a recursive call, where X is decremented, and the result of the recursion is added Y, which should result in Z.
+\texttt{mult} halts on the given query (with the correct results) because it decrements X for each recursive step, and therefore it must reach z (0), which is handled in a base case.
+
+Note that \texttt{mult} has 3 base cases. If I substitute those with only the base cases \texttt{mult}(\_,z,z) and \texttt{mult}(z,\_,z), it will return 2 results for the query \texttt{mult}(z,z,z), which should only be one.
+
+\texttt{mult} can be used to make pow2. I can understand from the forum that pow2 is $x^2$, so this can be implemented as follows:\\
+$pow2(t_1,t_2) :- \texttt{mult}(t_1,t_1,t_2)$
+
+\texttt{mult} can also be used to make sqrt and can be implemented as follows:\\
+$sqrt(t_1,t_2) :- \texttt{mult}(t_2,t_2,t_1)$
+
+Querying $notprime(X)$, all non-primes are listed in order from 0 and up. I had a problem with dublicate truths, but by using the helper predicate $notdividable$ (actually made for the predicate $prime(X)$) to only use the lowest factor of a given multiple, this was handled. The problem arised in for example $notprime(12)$.
+
+Querying $prime(X)$, no non-primes are listed. Also, only the prime number $s(s(z))$ (2) is listed, and then it reaches a stack overflow error. This is because the modulus predicate, used in the predicate \texttt{notdividable}, does not work correct when given a variable as $t_3$.
+
+\texttt{listPrimes} uses two assisting predicates, namely \texttt{makeList}, which makes a list of natural numbers from $z$ (0) to the given $n$, and \texttt{extractPrimes}, which given the list, extracts all prime numbers to a new list.
+
+\texttt{superprime} uses the predicate \texttt{listPrimes}, to make the prime sequence (up to the given numer $t_1$), and the assisting predicate \texttt{findSuperPrime} to run through the list and count each element, then, when reaching (presumably the last element, if \texttt{superprime} was given a prime number), check if the counter is prime. If so, the given prime number is also a super-prime.
+
+
+\section*{Assessment}
+I have only tested the solution manually and only on numbers up to 15, so there can certainly be multiple errors in the program, but it does atleast work on the example queries given by the assignment.
+
+\texttt{less}, \texttt{add} and \texttt{mult} should work as intended and handle queries with variables, where Prolog helps with testing correctness, as you can just give a variable and in return you get all possible results, which are easy to verify.
+
+\texttt{mod} does not work on all variable input. However this was not stated as a requirement in the assignment. This does however mess up the predicate \texttt{notdividable}, as it cannot take variable input neither, which again mess up the predicate \texttt{prime}. Again, this was not stated as a requirement in the assignment.
+
+If time allowed it, I would have made unit tests for each predicate, as this was also how I manually tested them in the interpreter. This would have been a descent way to test the predicates, because Prolog is truth-based as a default (as it is a logic programming language).
+
+\end{document}
